@@ -10,7 +10,7 @@ from sqlglot.dialects.dialect import (
     rename_func,
     to_number_with_nls_param,
 )
-from sqlglot.helper import seq_get
+from sqlglot.helper import seq_get, ensure_list
 from sqlglot.tokens import TokenType
 
 
@@ -35,6 +35,31 @@ def _date_add_sql(
         return f"{this} {kind_to_op[kind]} {self.sql(exp.Interval(this=value, unit=unit))}"
 
     return func
+
+
+class Conversion(exp.Binary):
+    arg_types = {
+        "this": True,
+        "to": False,
+        "leading_attribute": False,
+        "trailing_attribute": False,
+    }
+
+
+class Named(exp.Expression):
+    arg_types = {"value": True}
+
+    @property
+    def output_name(self) -> str:
+        return self.name
+
+
+class Title(exp.Expression):
+    arg_types = {"value": True}
+
+    @property
+    def output_name(self) -> str:
+        return self.alias
 
 
 class Teradata(Dialect):
@@ -92,11 +117,13 @@ class Teradata(Dialect):
             "LT": TokenType.LT,
             "MINUS": TokenType.EXCEPT,
             "MOD": TokenType.MOD,
+            "NAMED": TokenType.NAMED,
             "NE": TokenType.NEQ,
             "NOT=": TokenType.NEQ,
             "SAMPLE": TokenType.TABLE_SAMPLE,
             "SEL": TokenType.SELECT,
             "ST_GEOMETRY": TokenType.GEOMETRY,
+            "TITLE": TokenType.TITLE,
             "TOP": TokenType.TOP,
             "UPD": TokenType.UPDATE,
         }
@@ -154,6 +181,11 @@ class Teradata(Dialect):
                 exp.Use, this=self._parse_table(schema=False)
             ),
             TokenType.REPLACE: lambda self: self._parse_create(),
+        }
+
+        ATTRIBUTE_PARSERS = {
+            TokenType.NAMED: lambda self: self.expression(Named, value=self._parse_id_var()),
+            TokenType.TITLE: lambda self: self.expression(Title, value=self._parse_string())
         }
 
         FUNCTION_PARSERS = {
@@ -217,6 +249,69 @@ class Teradata(Dialect):
             if this.args.get("on"):
                 this.set("on", None)
                 self._retreat(self._index - 2)
+            return this
+
+        def _parse_format(self) -> t.Optional[exp.Expression]:
+            fmt_string = self._parse_string()
+            return self._parse_at_time_zone(fmt_string)
+
+        def _parse_attribute(self) -> t.Optional[exp.Expression]:
+            if self._match_set(self.ATTRIBUTE_PARSERS):
+                return self.ATTRIBUTE_PARSERS[self._prev.token_type](self)
+            elif self._match(TokenType.FORMAT):
+                return self._parse_format()
+            return None
+
+        def _parse_conversion(self, term: exp.Expression) -> t.Optional[exp.Expression]:
+            to = None
+            leading_attribute = self._parse_attribute()
+            if not leading_attribute or self._match(TokenType.COMMA):
+                to = self._parse_types()
+            trailing_attribute = self._match(TokenType.COMMA) and self._parse_attribute()
+            this = self.expression(
+                Conversion,
+                this=term,
+                to=to,
+                leading_attribute=leading_attribute,
+                trailing_attribute=trailing_attribute
+            )
+            self._match_r_paren()
+            return this
+
+        def _parse_bitwise(self) -> t.Optional[exp.Expression]:
+            this = self._parse_term()
+
+            while True:
+                if self._match_set(self.BITWISE):
+                    this = self.expression(
+                        self.BITWISE[self._prev.token_type],
+                        this=this,
+                        expression=self._parse_term(),
+                    )
+                elif self.dialect.DPIPE_IS_STRING_CONCAT and self._match(TokenType.DPIPE):
+                    this = self.expression(
+                        exp.DPipe,
+                        this=this,
+                        expression=self._parse_term(),
+                        safe=not self.dialect.STRICT_STRING_CONCAT,
+                    )
+                elif self._match(TokenType.DQMARK):
+                    this = self.expression(
+                        exp.Coalesce, this=this, expressions=ensure_list(self._parse_term())
+                    )
+                elif self._match_pair(TokenType.LT, TokenType.LT):
+                    this = self.expression(
+                        exp.BitwiseLeftShift, this=this, expression=self._parse_term()
+                    )
+                elif self._match_pair(TokenType.GT, TokenType.GT):
+                    this = self.expression(
+                        exp.BitwiseRightShift, this=this, expression=self._parse_term()
+                    )
+                elif self._match(TokenType.L_PAREN):
+                    this = self._parse_conversion(this)
+                else:
+                    break
+
             return this
 
     class Generator(generator.Generator):
