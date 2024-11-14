@@ -301,7 +301,7 @@ class Expression(metaclass=_Expression):
         """
         return deepcopy(self)
 
-    def add_comments(self, comments: t.Optional[t.List[str]] = None) -> None:
+    def add_comments(self, comments: t.Optional[t.List[str]] = None, prepend: bool = False) -> None:
         if self.comments is None:
             self.comments = []
 
@@ -313,7 +313,12 @@ class Expression(metaclass=_Expression):
                         k, *v = kv.split("=")
                         value = v[0].strip() if v else True
                         self.meta[k.strip()] = value
-                self.comments.append(comment)
+
+                if not prepend:
+                    self.comments.append(comment)
+
+            if prepend:
+                self.comments = comments + self.comments
 
     def pop_comments(self) -> t.List[str]:
         comments = self.comments or []
@@ -5584,6 +5589,17 @@ class MonthsBetween(Func):
     arg_types = {"this": True, "expression": True, "roundoff": False}
 
 
+class MakeInterval(Func):
+    arg_types = {
+        "year": False,
+        "month": False,
+        "day": False,
+        "hour": False,
+        "minute": False,
+        "second": False,
+    }
+
+
 class LastDay(Func, TimeUnit):
     _sql_names = ["LAST_DAY", "LAST_DAY_OF_MONTH"]
     arg_types = {"this": True, "unit": False}
@@ -5810,6 +5826,11 @@ class Initcap(Func):
 
 class IsNan(Func):
     _sql_names = ["IS_NAN", "ISNAN"]
+
+
+# https://cloud.google.com/bigquery/docs/reference/standard-sql/json_functions#int64_for_json
+class Int64(Func):
+    pass
 
 
 class IsInf(Func):
@@ -6488,6 +6509,10 @@ class TsOrDsToDateStr(Func):
 
 class TsOrDsToDate(Func):
     arg_types = {"this": True, "format": False, "safe": False}
+
+
+class TsOrDsToDatetime(Func):
+    pass
 
 
 class TsOrDsToTime(Func):
@@ -7793,8 +7818,8 @@ def cast(
         existing_cast_type: DataType.Type = expr.to.this
         new_cast_type: DataType.Type = data_type.this
         types_are_equivalent = type_mapping.get(
-            existing_cast_type, existing_cast_type
-        ) == type_mapping.get(new_cast_type, new_cast_type)
+            existing_cast_type, existing_cast_type.value
+        ) == type_mapping.get(new_cast_type, new_cast_type.value)
         if expr.is_type(data_type) or types_are_equivalent:
             return expr
 
@@ -8105,7 +8130,7 @@ def table_name(table: Table | str, dialect: DialectType = None, identify: bool =
 
     return ".".join(
         (
-            part.sql(dialect=dialect, identify=True, copy=False)
+            part.sql(dialect=dialect, identify=True, copy=False, comments=False)
             if identify or not SAFE_IDENTIFIER_RE.match(part.name)
             else part.name
         )
