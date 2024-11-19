@@ -450,6 +450,7 @@ class Parser(metaclass=_Parser):
     # Tokens that can represent identifiers
     ID_VAR_TOKENS = {
         TokenType.ALL,
+        TokenType.ATTACH,
         TokenType.VAR,
         TokenType.ANTI,
         TokenType.APPLY,
@@ -471,6 +472,7 @@ class Parser(metaclass=_Parser):
         TokenType.DELETE,
         TokenType.DESC,
         TokenType.DESCRIBE,
+        TokenType.DETACH,
         TokenType.DICTIONARY,
         TokenType.DIV,
         TokenType.END,
@@ -806,7 +808,7 @@ class Parser(metaclass=_Parser):
             kind=self._parse_var_from_options(self.USABLES, raise_unmatched=False),
             this=self._parse_table(schema=False),
         ),
-        TokenType.SEMICOLON: lambda self: self.expression(exp.Semicolon),
+        TokenType.SEMICOLON: lambda self: exp.Semicolon(),
     }
 
     UNARY_PARSERS = {
@@ -1715,7 +1717,10 @@ class Parser(metaclass=_Parser):
             return None
 
         if self._match_set(self.STATEMENT_PARSERS):
-            return self.STATEMENT_PARSERS[self._prev.token_type](self)
+            comments = self._prev_comments
+            stmt = self.STATEMENT_PARSERS[self._prev.token_type](self)
+            stmt.add_comments(comments, prepend=True)
+            return stmt
 
         if self._match_set(self.dialect.tokenizer.COMMANDS):
             return self._parse_command()
@@ -1735,9 +1740,13 @@ class Parser(metaclass=_Parser):
 
         concurrently = self._match_text_seq("CONCURRENTLY")
         if_exists = exists or self._parse_exists()
-        table = self._parse_table_parts(
-            schema=True, is_db_reference=self._prev.token_type == TokenType.SCHEMA
-        )
+
+        if kind == "COLUMN":
+            this = self._parse_column()
+        else:
+            this = self._parse_table_parts(
+                schema=True, is_db_reference=self._prev.token_type == TokenType.SCHEMA
+            )
 
         cluster = self._parse_on_property() if self._match(TokenType.ON) else None
 
@@ -1748,9 +1757,8 @@ class Parser(metaclass=_Parser):
 
         return self.expression(
             exp.Drop,
-            comments=start.comments,
             exists=if_exists,
-            this=table,
+            this=this,
             expressions=expressions,
             kind=self.dialect.CREATABLE_KIND_MAPPING.get(kind) or kind,
             temporary=temporary,
@@ -1772,7 +1780,6 @@ class Parser(metaclass=_Parser):
     def _parse_create(self) -> exp.Create | exp.Command:
         # Note: this can't be None because we've matched a statement parser
         start = self._prev
-        comments = self._prev_comments
 
         replace = (
             start.token_type == TokenType.REPLACE
@@ -1919,7 +1926,6 @@ class Parser(metaclass=_Parser):
         create_kind_text = create_token.text.upper()
         return self.expression(
             exp.Create,
-            comments=comments,
             this=this,
             kind=self.dialect.CREATABLE_KIND_MAPPING.get(create_kind_text) or create_kind_text,
             replace=replace,
@@ -2605,7 +2611,14 @@ class Parser(metaclass=_Parser):
         if self._match(TokenType.DOT):
             style = None
             self._retreat(self._index - 2)
-        this = self._parse_table(schema=True)
+
+        format = self._parse_property() if self._match(TokenType.FORMAT, advance=False) else None
+
+        if self._match_set(self.STATEMENT_PARSERS, advance=False):
+            this = self._parse_statement()
+        else:
+            this = self._parse_table(schema=True)
+
         properties = self._parse_properties()
         expressions = properties.expressions if properties else None
         partition = self._parse_partition()
@@ -2616,6 +2629,7 @@ class Parser(metaclass=_Parser):
             kind=kind,
             expressions=expressions,
             partition=partition,
+            format=format,
         )
 
     def _parse_multitable_inserts(self, comments: t.Optional[t.List[str]]) -> exp.MultitableInserts:
@@ -2659,7 +2673,7 @@ class Parser(metaclass=_Parser):
         )
 
     def _parse_insert(self) -> t.Union[exp.Insert, exp.MultitableInserts]:
-        comments = ensure_list(self._prev_comments)
+        comments = []
         hint = self._parse_hint()
         overwrite = self._match(TokenType.OVERWRITE)
         ignore = self._match(TokenType.IGNORE)
@@ -2845,7 +2859,6 @@ class Parser(metaclass=_Parser):
         # This handles MySQL's "Multiple-Table Syntax"
         # https://dev.mysql.com/doc/refman/8.0/en/delete.html
         tables = None
-        comments = self._prev_comments
         if not self._match(TokenType.FROM, advance=False):
             tables = self._parse_csv(self._parse_table) or None
 
@@ -2853,7 +2866,6 @@ class Parser(metaclass=_Parser):
 
         return self.expression(
             exp.Delete,
-            comments=comments,
             tables=tables,
             this=self._match(TokenType.FROM) and self._parse_table(joins=True),
             using=self._match(TokenType.USING) and self._parse_table(joins=True),
@@ -2864,13 +2876,11 @@ class Parser(metaclass=_Parser):
         )
 
     def _parse_update(self) -> exp.Update:
-        comments = self._prev_comments
         this = self._parse_table(joins=True, alias_tokens=self.UPDATE_ALIAS_TOKENS)
         expressions = self._match(TokenType.SET) and self._parse_csv(self._parse_equality)
         returning = self._parse_returning()
         return self.expression(
             exp.Update,
-            comments=comments,
             **{  # type: ignore
                 "this": this,
                 "expressions": expressions,
@@ -5109,9 +5119,8 @@ class Parser(metaclass=_Parser):
             else:
                 field = self._parse_field(any_token=True, anonymous_func=True)
 
-            if isinstance(field, exp.Func) and this:
-                # bigquery allows function calls like x.y.count(...)
-                # SAFE.SUBSTR(...)
+            if isinstance(field, (exp.Func, exp.Window)) and this:
+                # BQ & snowflake allow function calls like x.y.count(...), SAFE.SUBSTR(...) etc
                 # https://cloud.google.com/bigquery/docs/reference/standard-sql/functions-reference#function_call_rules
                 this = exp.replace_tree(
                     this,
@@ -5135,6 +5144,11 @@ class Parser(metaclass=_Parser):
                     db=this.args.get("table"),
                     catalog=this.args.get("db"),
                 )
+            elif isinstance(field, exp.Window):
+                # Move the exp.Dot's to the window's function
+                window_func = self.expression(exp.Dot, this=this, expression=field.this)
+                field.set("this", window_func)
+                this = field
             else:
                 this = self.expression(exp.Dot, this=this, expression=field)
 

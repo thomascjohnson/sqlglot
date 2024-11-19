@@ -25,6 +25,7 @@ from sqlglot.dialects.dialect import (
     no_safe_divide_sql,
     no_timestamp_sql,
     timestampdiff_sql,
+    no_make_interval_sql,
 )
 from sqlglot.generator import unsupported_args
 from sqlglot.helper import flatten, is_float, is_int, seq_get
@@ -105,11 +106,14 @@ def _build_date_time_add(expr_type: t.Type[E]) -> t.Callable[[t.List], E]:
 
 # https://docs.snowflake.com/en/sql-reference/functions/div0
 def _build_if_from_div0(args: t.List) -> exp.If:
-    cond = exp.EQ(this=seq_get(args, 1), expression=exp.Literal.number(0)).and_(
-        exp.Is(this=seq_get(args, 0), expression=exp.null()).not_()
+    lhs = exp._wrap(seq_get(args, 0), exp.Binary)
+    rhs = exp._wrap(seq_get(args, 1), exp.Binary)
+
+    cond = exp.EQ(this=rhs, expression=exp.Literal.number(0)).and_(
+        exp.Is(this=lhs, expression=exp.null()).not_()
     )
     true = exp.Literal.number(0)
-    false = exp.Div(this=seq_get(args, 0), expression=seq_get(args, 1))
+    false = exp.Div(this=lhs, expression=rhs)
     return exp.If(this=cond, true=true, false=false)
 
 
@@ -866,6 +870,7 @@ class Snowflake(Dialect):
             exp.LogicalAnd: rename_func("BOOLAND_AGG"),
             exp.LogicalOr: rename_func("BOOLOR_AGG"),
             exp.Map: lambda self, e: var_map_sql(self, e, "OBJECT_CONSTRUCT"),
+            exp.MakeInterval: no_make_interval_sql,
             exp.Max: max_or_greatest,
             exp.Min: min_or_least,
             exp.ParseJSON: lambda self, e: self.func(
@@ -908,9 +913,6 @@ class Snowflake(Dialect):
             ),
             exp.TimestampTrunc: timestamptrunc_sql(),
             exp.TimeStrToTime: timestrtotime_sql,
-            exp.TimeToStr: lambda self, e: self.func(
-                "TO_CHAR", exp.cast(e.this, exp.DataType.Type.TIMESTAMP), self.format_time(e)
-            ),
             exp.TimeToUnix: lambda self, e: f"EXTRACT(epoch_second FROM {self.sql(e, 'this')})",
             exp.ToArray: rename_func("TO_ARRAY"),
             exp.ToChar: lambda self, e: self.function_fallback_sql(e),
@@ -1147,3 +1149,10 @@ class Snowflake(Dialect):
                 exp.ParseJSON(this=this) if this.is_string else this,
                 expression.expression,
             )
+
+        def timetostr_sql(self, expression: exp.TimeToStr) -> str:
+            this = expression.this
+            if not isinstance(this, exp.TsOrDsToTimestamp):
+                this = exp.cast(this, exp.DataType.Type.TIMESTAMP)
+
+            return self.func("TO_CHAR", this, self.format_time(expression))

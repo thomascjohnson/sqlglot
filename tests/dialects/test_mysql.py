@@ -82,6 +82,10 @@ class TestMySQL(Validator):
             "CREATE OR REPLACE VIEW my_view AS SELECT column1 AS `boo`, column2 AS `foo` FROM my_table WHERE column3 = 'some_value' UNION SELECT q.* FROM fruits_table, JSON_TABLE(Fruits, '$[*]' COLUMNS(id VARCHAR(255) PATH '$.$id', value VARCHAR(255) PATH '$.value')) AS q",
         )
         self.validate_identity(
+            "/*left*/ EXPLAIN SELECT /*hint*/ col FROM t1 /*right*/",
+            "/* left */ DESCRIBE /* hint */ SELECT col FROM t1 /* right */",
+        )
+        self.validate_identity(
             "CREATE TABLE t (name VARCHAR)",
             "CREATE TABLE t (name TEXT)",
         )
@@ -1315,3 +1319,6 @@ COMMENT='客户账户表'"""
         expression = self.parse_one("EXPLAIN ANALYZE SELECT * FROM t")
         self.assertIsInstance(expression, exp.Describe)
         self.assertEqual(expression.text("style"), "ANALYZE")
+
+        for format in ("JSON", "TRADITIONAL", "TREE"):
+            self.validate_identity(f"DESCRIBE FORMAT={format} UPDATE test SET test_col = 'abc'")

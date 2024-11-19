@@ -301,7 +301,7 @@ class Expression(metaclass=_Expression):
         """
         return deepcopy(self)
 
-    def add_comments(self, comments: t.Optional[t.List[str]] = None) -> None:
+    def add_comments(self, comments: t.Optional[t.List[str]] = None, prepend: bool = False) -> None:
         if self.comments is None:
             self.comments = []
 
@@ -313,7 +313,12 @@ class Expression(metaclass=_Expression):
                         k, *v = kv.split("=")
                         value = v[0].strip() if v else True
                         self.meta[k.strip()] = value
-                self.comments.append(comment)
+
+                if not prepend:
+                    self.comments.append(comment)
+
+            if prepend:
+                self.comments = comments + self.comments
 
     def pop_comments(self) -> t.List[str]:
         comments = self.comments or []
@@ -1471,7 +1476,18 @@ class Describe(Expression):
         "kind": False,
         "expressions": False,
         "partition": False,
+        "format": False,
     }
+
+
+# https://duckdb.org/docs/sql/statements/attach.html#attach
+class Attach(Expression):
+    arg_types = {"this": True, "exists": False, "expressions": False}
+
+
+# https://duckdb.org/docs/sql/statements/attach.html#detach
+class Detach(Expression):
+    arg_types = {"this": True, "exists": False}
 
 
 # https://duckdb.org/docs/guides/meta/summarize.html
@@ -4657,6 +4673,10 @@ class AddConstraint(Expression):
     arg_types = {"expressions": True}
 
 
+class AttachOption(Expression):
+    arg_types = {"this": True, "expression": False}
+
+
 class DropPartition(Expression):
     arg_types = {"expressions": True, "exists": False}
 
@@ -5455,6 +5475,10 @@ class ConcatWs(Concat):
     _sql_names = ["CONCAT_WS"]
 
 
+class Contains(Func):
+    arg_types = {"this": True, "expression": True}
+
+
 # https://docs.oracle.com/cd/B13789_01/server.101/b10759/operators004.htm#i1035022
 class ConnectByRoot(Func):
     pass
@@ -5582,6 +5606,17 @@ class WeekOfYear(Func):
 
 class MonthsBetween(Func):
     arg_types = {"this": True, "expression": True, "roundoff": False}
+
+
+class MakeInterval(Func):
+    arg_types = {
+        "year": False,
+        "month": False,
+        "day": False,
+        "hour": False,
+        "minute": False,
+        "second": False,
+    }
 
 
 class LastDay(Func, TimeUnit):
@@ -5810,6 +5845,11 @@ class Initcap(Func):
 
 class IsNan(Func):
     _sql_names = ["IS_NAN", "ISNAN"]
+
+
+# https://cloud.google.com/bigquery/docs/reference/standard-sql/json_functions#int64_for_json
+class Int64(Func):
+    pass
 
 
 class IsInf(Func):
@@ -6304,7 +6344,7 @@ class Round(Func):
 
 
 class RowNumber(Func):
-    arg_types: t.Dict[str, t.Any] = {}
+    arg_types = {"this": False}
 
 
 class SafeDivide(Func):
@@ -6488,6 +6528,10 @@ class TsOrDsToDateStr(Func):
 
 class TsOrDsToDate(Func):
     arg_types = {"this": True, "format": False, "safe": False}
+
+
+class TsOrDsToDatetime(Func):
+    pass
 
 
 class TsOrDsToTime(Func):
@@ -6947,7 +6991,15 @@ def _combine(
     return this
 
 
-def _wrap(expression: E, kind: t.Type[Expression]) -> E | Paren:
+@t.overload
+def _wrap(expression: None, kind: t.Type[Expression]) -> None: ...
+
+
+@t.overload
+def _wrap(expression: E, kind: t.Type[Expression]) -> E | Paren: ...
+
+
+def _wrap(expression: t.Optional[E], kind: t.Type[Expression]) -> t.Optional[E] | Paren:
     return Paren(this=expression) if isinstance(expression, kind) else expression
 
 
@@ -7793,8 +7845,8 @@ def cast(
         existing_cast_type: DataType.Type = expr.to.this
         new_cast_type: DataType.Type = data_type.this
         types_are_equivalent = type_mapping.get(
-            existing_cast_type, existing_cast_type
-        ) == type_mapping.get(new_cast_type, new_cast_type)
+            existing_cast_type, existing_cast_type.value
+        ) == type_mapping.get(new_cast_type, new_cast_type.value)
         if expr.is_type(data_type) or types_are_equivalent:
             return expr
 
@@ -8105,7 +8157,7 @@ def table_name(table: Table | str, dialect: DialectType = None, identify: bool =
 
     return ".".join(
         (
-            part.sql(dialect=dialect, identify=True, copy=False)
+            part.sql(dialect=dialect, identify=True, copy=False, comments=False)
             if identify or not SAFE_IDENTIFIER_RE.match(part.name)
             else part.name
         )

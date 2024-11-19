@@ -606,6 +606,17 @@ WHERE
             },
         )
         self.validate_all(
+            "DIV0(a - b, c - d)",
+            write={
+                "snowflake": "IFF((c - d) = 0 AND NOT (a - b) IS NULL, 0, (a - b) / (c - d))",
+                "sqlite": "IIF((c - d) = 0 AND NOT (a - b) IS NULL, 0, CAST((a - b) AS REAL) / (c - d))",
+                "presto": "IF((c - d) = 0 AND NOT (a - b) IS NULL, 0, CAST((a - b) AS DOUBLE) / (c - d))",
+                "spark": "IF((c - d) = 0 AND NOT (a - b) IS NULL, 0, (a - b) / (c - d))",
+                "hive": "IF((c - d) = 0 AND NOT (a - b) IS NULL, 0, (a - b) / (c - d))",
+                "duckdb": "CASE WHEN (c - d) = 0 AND NOT (a - b) IS NULL THEN 0 ELSE (a - b) / (c - d) END",
+            },
+        )
+        self.validate_all(
             "ZEROIFNULL(foo)",
             write={
                 "snowflake": "IFF(foo IS NULL, 0, foo)",
@@ -2239,3 +2250,13 @@ SINGLE = TRUE""",
         self.validate_identity(
             "GRANT ALL PRIVILEGES ON FUNCTION mydb.myschema.ADD5(number) TO ROLE analyst"
         )
+
+    def test_window_function_arg(self):
+        query = "SELECT * FROM TABLE(db.schema.FUNC(a) OVER ())"
+
+        ast = self.parse_one(query)
+        window = ast.find(exp.Window)
+
+        self.assertEqual(ast.sql("snowflake"), query)
+        self.assertEqual(len(list(ast.find_all(exp.Column))), 1)
+        self.assertEqual(window.this.sql("snowflake"), "db.schema.FUNC(a)")

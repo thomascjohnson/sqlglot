@@ -148,6 +148,7 @@ class Generator(metaclass=_Generator):
         exp.InputModelProperty: lambda self, e: f"INPUT{self.sql(e, 'this')}",
         exp.Intersect: lambda self, e: self.set_operations(e),
         exp.IntervalSpan: lambda self, e: f"{self.sql(e, 'this')} TO {self.sql(e, 'expression')}",
+        exp.Int64: lambda self, e: self.sql(exp.cast(e.this, exp.DataType.Type.BIGINT)),
         exp.LanguageProperty: lambda self, e: self.naked_property(e),
         exp.LocationProperty: lambda self, e: self.naked_property(e),
         exp.LogProperty: lambda _, e: f"{'NO ' if e.args.get('no') else ''}LOG",
@@ -593,6 +594,7 @@ class Generator(metaclass=_Generator):
     WITH_SEPARATED_COMMENTS: t.Tuple[t.Type[exp.Expression], ...] = (
         exp.Command,
         exp.Create,
+        exp.Describe,
         exp.Delete,
         exp.Drop,
         exp.From,
@@ -1191,7 +1193,10 @@ class Generator(metaclass=_Generator):
         style = f" {style}" if style else ""
         partition = self.sql(expression, "partition")
         partition = f" {partition}" if partition else ""
-        return f"DESCRIBE{style} {self.sql(expression, 'this')}{partition}"
+        format = self.sql(expression, "format")
+        format = f" {format}" if format else ""
+
+        return f"DESCRIBE{style}{format} {self.sql(expression, 'this')}{partition}"
 
     def heredoc_sql(self, expression: exp.Heredoc) -> str:
         tag = self.sql(expression, "tag")
@@ -3896,7 +3901,14 @@ class Generator(metaclass=_Generator):
         if isinstance(this, exp.TsOrDsToTimestamp) or this.is_type(exp.DataType.Type.TIMESTAMP):
             return self.sql(this)
 
-        return self.sql(exp.cast(this, exp.DataType.Type.TIMESTAMP))
+        return self.sql(exp.cast(this, exp.DataType.Type.TIMESTAMP, dialect=self.dialect))
+
+    def tsordstodatetime_sql(self, expression: exp.TsOrDsToDatetime) -> str:
+        this = expression.this
+        if isinstance(this, exp.TsOrDsToDatetime) or this.is_type(exp.DataType.Type.DATETIME):
+            return self.sql(this)
+
+        return self.sql(exp.cast(this, exp.DataType.Type.DATETIME, dialect=self.dialect))
 
     def tsordstodate_sql(self, expression: exp.TsOrDsToDate) -> str:
         this = expression.this
@@ -4511,3 +4523,23 @@ class Generator(metaclass=_Generator):
             dim = exp.Literal.number(1)
 
         return self.func(self.ARRAY_SIZE_NAME, expression.this, dim)
+
+    def attach_sql(self, expression: exp.Attach) -> str:
+        this = self.sql(expression, "this")
+        exists_sql = " IF NOT EXISTS" if expression.args.get("exists") else ""
+        expressions = self.expressions(expression)
+        expressions = f" ({expressions})" if expressions else ""
+
+        return f"ATTACH{exists_sql} {this}{expressions}"
+
+    def detach_sql(self, expression: exp.Detach) -> str:
+        this = self.sql(expression, "this")
+        exists_sql = " IF EXISTS" if expression.args.get("exists") else ""
+
+        return f"DETACH{exists_sql} {this}"
+
+    def attachoption_sql(self, expression: exp.AttachOption) -> str:
+        this = self.sql(expression, "this")
+        value = self.sql(expression, "expression")
+        value = f" {value}" if value else ""
+        return f"{this}{value}"
