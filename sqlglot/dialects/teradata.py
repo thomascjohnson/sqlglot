@@ -243,59 +243,54 @@ class Teradata(Dialect):
             return self._parse_types()
 
         def _parse_conversion(self, term: exp.Expression) -> t.Optional[exp.Expression]:
-            arguments: dict[str, t.Union[exp.Expression, str, list[str]]] = {"this": term}
-            order = []
+            conversion = self.expression(
+                exp.TeradataConversion, comments=None, this=term, attribute_order=[]
+            )
             while self._match(TokenType.COMMA) or not self._match(TokenType.R_PAREN, advance=False):
-                if arguments.get("title") and self._parse_title():
+                if conversion.args.get("title") and self._parse_title():
                     self.raise_error("Duplicate TITLE expressions in Teradata Conversion")
                 else:
                     title = self._parse_title()
                     if title:
-                        arguments["title"] = title
-                        order.append("title")
+                        conversion.args["title"] = title
+                        conversion.args["attribute_order"].append("title")
 
-                if arguments.get("named") and self._parse_named():
+                if conversion.args.get("named") and self._parse_named():
                     self.raise_error("Duplicate NAMED expressions in Teradata Conversion")
                 else:
                     named = self._parse_named()
                     if named:
-                        arguments["named"] = named
-                        order.append("named")
+                        conversion.args["named"] = named
+                        conversion.args["attribute_order"].append("named")
 
-                if arguments.get("to") and self._parse_conversion_type():
+                if conversion.args.get("to") and self._parse_conversion_type():
                     self.raise_error("Duplicate type expressions in Teradata Conversion")
                 else:
                     to = self._parse_conversion_type()
                     if to:
-                        arguments["to"] = to
-                        order.append("to")
+                        conversion.args["to"] = to
+                        conversion.args["attribute_order"].append("to")
 
-                if arguments.get("fmt") and self._parse_format():
+                if conversion.args.get("fmt") and self._parse_format():
                     self.raise_error("Duplicate FORMAT expressions in Teradata Conversion")
                 else:
                     fmt = self._parse_format()
-                    if order[-1] != "to" and fmt:
-                        self.raise_error(
-                            f"FORMAT expressions must come after type, not {order[-1]} argument"
-                        )
+                    if conversion.args["attribute_order"][-1] != "to" and fmt:
+                        self.raise_error("FORMAT expressions be preceded by a type")
                     if fmt:
-                        arguments["fmt"] = fmt
-                        order.append("fmt")
+                        conversion.args["fmt"] = fmt
+                        conversion.args["attribute_order"].append("fmt")
 
                 if (
-                    not arguments.get("title")
-                    and not arguments.get("named")
-                    and not arguments.get("to")
+                    not conversion.args.get("title")
+                    and not conversion.args.get("named")
+                    and not conversion.args.get("to")
                 ):
                     self.raise_error("Expected TITLE, NAMED or data type expression")
 
             self._match_r_paren()
-            arguments["attribute_order"] = order
-            return self.expression(
-                exp.TeradataConversion,
-                None,
-                **arguments,
-            )
+
+            return conversion
 
         def _parse_bitwise(self) -> t.Optional[exp.Expression]:
             this = super()._parse_bitwise()
