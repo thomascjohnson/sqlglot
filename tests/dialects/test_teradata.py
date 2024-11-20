@@ -326,3 +326,25 @@ class TestTeradata(Validator):
                 "teradata": "CAST(TO_CHAR(x, 'Q') AS INT)",
             },
         )
+
+    def test_conversion(self):
+        # Conversion in select clause
+        self.validate_identity("SELECT z (INT, FORMAT '999', TITLE 'x', NAMED abc) AS y")
+        self.validate_identity("SELECT (z (INT, FORMAT '999', TITLE 'x', NAMED abc)) AS y")
+        self.validate_identity("SELECT z (INT, TITLE 'x', NAMED abc) AS y")
+        self.validate_identity("SELECT z (INT, TITLE 'x') AS y")
+        self.validate_identity("SELECT z (INT, NAMED abc) AS y")
+        self.validate_identity("SELECT z (INT) AS y")
+        self.validate_identity("SELECT z (INT, FORMAT '999') AS y")
+        self.validate_identity("SELECT z (NAMED abc) AS y")
+        self.validate_identity("SELECT z (TITLE 'abc') AS y")
+        self.validate_identity("SELECT z (NAMED abc) AS y")
+        # Chained conversion
+        self.validate_identity("SELECT z (INT, FORMAT '9999') (CHAR(4)) AS y")
+        # Conversion in where clause
+        self.validate_identity(
+            "SELECT x FROM y WHERE (z (DATE, FORMAT '2024-01-01') > '2020-01-01') AND (x (INT, FORMAT '9') > 0)"
+        )
+        self.validate_identity(
+            "SELECT x FROM y WHERE z (DATE, FORMAT '2024-01-01', TITLE 'abc', NAMED xyz) > '2020-01-01'"
+        )
