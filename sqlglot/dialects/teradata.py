@@ -10,7 +10,7 @@ from sqlglot.dialects.dialect import (
     rename_func,
     to_number_with_nls_param,
 )
-from sqlglot.helper import seq_get, ensure_list
+from sqlglot.helper import seq_get
 from sqlglot.tokens import TokenType
 
 
@@ -35,31 +35,6 @@ def _date_add_sql(
         return f"{this} {kind_to_op[kind]} {self.sql(exp.Interval(this=value, unit=unit))}"
 
     return func
-
-
-class Conversion(exp.Binary):
-    arg_types = {
-        "this": True,
-        "to": False,
-        "leading_attribute": False,
-        "trailing_attribute": False,
-    }
-
-
-class Named(exp.Expression):
-    arg_types = {"value": True}
-
-    @property
-    def output_name(self) -> str:
-        return self.name
-
-
-class Title(exp.Expression):
-    arg_types = {"value": True}
-
-    @property
-    def output_name(self) -> str:
-        return self.alias
 
 
 class Teradata(Dialect):
@@ -183,11 +158,6 @@ class Teradata(Dialect):
             TokenType.REPLACE: lambda self: self._parse_create(),
         }
 
-        ATTRIBUTE_PARSERS = {
-            TokenType.NAMED: lambda self: self.expression(Named, value=self._parse_id_var()),
-            TokenType.TITLE: lambda self: self.expression(Title, value=self._parse_string())
-        }
-
         FUNCTION_PARSERS = {
             **parser.Parser.FUNCTION_PARSERS,
             # https://docs.teradata.com/r/SQL-Functions-Operators-Expressions-and-Predicates/June-2017/Data-Type-Conversions/TRYCAST
@@ -252,43 +222,109 @@ class Teradata(Dialect):
             return this
 
         def _parse_format(self) -> t.Optional[exp.Expression]:
-            fmt_string = self._parse_string()
-            return self._parse_at_time_zone(fmt_string)
-
-        def _parse_attribute(self) -> t.Optional[exp.Expression]:
-            if self._match_set(self.ATTRIBUTE_PARSERS):
-                return self.ATTRIBUTE_PARSERS[self._prev.token_type](self)
-            elif self._match(TokenType.FORMAT):
-                return self._parse_format()
+            if self._match(TokenType.FORMAT):
+                fmt_string = self._parse_string()
+                if not fmt_string:
+                    self.raise_error("FORMAT supplied without specifying valid format")
+                return self._parse_at_time_zone(fmt_string)
             return None
 
+        def _parse_named(self) -> t.Optional[exp.Expression]:
+            if self._match(TokenType.NAMED):
+                return self.expression(exp.TeradataNamed, value=self._parse_id_var())
+            return None
+
+        def _parse_title(self) -> t.Optional[exp.Expression]:
+            if self._match(TokenType.TITLE):
+                return self.expression(exp.TeradataTitle, value=self._parse_string())
+            return None
+
+        def _parse_conversion_type(self) -> t.Optional[exp.Expression]:
+            return self._parse_types()
+
         def _parse_conversion(self, term: exp.Expression) -> t.Optional[exp.Expression]:
-            to = None
-            leading_attribute = self._parse_attribute()
-            if not leading_attribute or self._match(TokenType.COMMA):
-                to = self._parse_types()
-            trailing_attribute = self._match(TokenType.COMMA) and self._parse_attribute()
-            this = self.expression(
-                Conversion,
-                this=term,
-                to=to,
-                leading_attribute=leading_attribute,
-                trailing_attribute=trailing_attribute
-            )
+            arguments: dict[str, t.Union[exp.Expression, str, list[str]]] = {"this": term}
+            order = []
+            while self._match(TokenType.COMMA) or not self._match(TokenType.R_PAREN, advance=False):
+                if arguments.get("title") and self._parse_title():
+                    self.raise_error("Duplicate TITLE expressions in Teradata Conversion")
+                else:
+                    title = self._parse_title()
+                    if title:
+                        arguments["title"] = title
+                        order.append("title")
+
+                if arguments.get("named") and self._parse_named():
+                    self.raise_error("Duplicate NAMED expressions in Teradata Conversion")
+                else:
+                    named = self._parse_named()
+                    if named:
+                        arguments["named"] = named
+                        order.append("named")
+
+                if arguments.get("to") and self._parse_conversion_type():
+                    self.raise_error("Duplicate type expressions in Teradata Conversion")
+                else:
+                    to = self._parse_conversion_type()
+                    if to:
+                        arguments["to"] = to
+                        order.append("to")
+
+                if arguments.get("fmt") and self._parse_format():
+                    self.raise_error("Duplicate FORMAT expressions in Teradata Conversion")
+                else:
+                    fmt = self._parse_format()
+                    if order[-1] != "to" and fmt:
+                        self.raise_error(
+                            f"FORMAT expressions must come after type, not {order[-1]} argument"
+                        )
+                    if fmt:
+                        arguments["fmt"] = fmt
+                        order.append("fmt")
+
+                if (
+                    not arguments.get("title")
+                    and not arguments.get("named")
+                    and not arguments.get("to")
+                ):
+                    self.raise_error("Expected TITLE, NAMED or data type expression")
+
             self._match_r_paren()
-            return this
+            arguments["attribute_order"] = order
+            return self.expression(
+                exp.TeradataConversion,
+                None,
+                **arguments,
+            )
 
         def _parse_bitwise(self) -> t.Optional[exp.Expression]:
             this = super()._parse_bitwise()
 
-            if this:
-                while True:
-                    if self._match(TokenType.L_PAREN):
-                        this = self._parse_conversion(this)
-                    else:
-                        break
+            while True:
+                if self._match(TokenType.L_PAREN) and this:
+                    this = self._parse_conversion(this)
+                else:
+                    break
 
             return this
+
+        def _parse_function_call(
+            self,
+            functions: t.Optional[t.Dict[str, t.Callable]] = None,
+            anonymous: bool = False,
+            optional_parens: bool = True,
+            any_token: bool = False,
+        ) -> t.Optional[exp.Expression]:
+            if self._next and self._next.token_type == TokenType.L_PAREN:
+                index = self._index
+                self._advance(2)
+                this = self._match_set(
+                    {TokenType.NAMED, TokenType.TITLE, *self.TYPE_TOKENS}, advance=False
+                )
+                self._retreat(index)
+                if this:
+                    return None
+            return super()._parse_function_call(functions, anonymous, optional_parens, any_token)
 
     class Generator(generator.Generator):
         LIMIT_IS_TOP = True
@@ -421,3 +457,19 @@ class Teradata(Dialect):
                 return f"({multiplier} * {super().interval_sql(exp.Interval(this=expression.this, unit=exp.var('DAY')))})"
 
             return super().interval_sql(expression)
+
+        def teradatatitle_sql(self, expression: exp.TeradataTitle) -> str:
+            return f"TITLE {self.sql(expression, 'value')}"
+
+        def teradatanamed_sql(self, expression: exp.TeradataNamed) -> str:
+            return f"NAMED {self.sql(expression, 'value')}"
+
+        def teradataconversion_sql(self, expression: exp.TeradataConversion) -> str:
+            args = ", ".join(
+                [
+                    f"{'FORMAT ' if arg == 'fmt' else ''}{self.sql(expression.args[arg])}"
+                    for arg in expression.args["attribute_order"]
+                    if arg not in ("attribute_order", "this")
+                ]
+            )
+            return f"{self.sql(expression, "this")} ({args})"
