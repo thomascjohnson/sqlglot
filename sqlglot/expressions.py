@@ -4785,6 +4785,17 @@ class DPipe(Binary):
     arg_types = {"this": True, "expression": True, "safe": False}
 
 
+class TeradataConversion(Binary):
+    arg_types = {
+        "this": True,
+        "to": False,
+        "fmt": False,
+        "named": False,
+        "title": False,
+        "attribute_order": False,
+    }
+
+
 class EQ(Binary, Predicate):
     pass
 
@@ -4920,6 +4931,14 @@ class Alias(Expression):
     @property
     def output_name(self) -> str:
         return self.alias
+
+
+class TeradataNamed(Expression):
+    arg_types = {"value": True}
+
+
+class TeradataTitle(Expression):
+    arg_types = {"value": True}
 
 
 # BigQuery requires the UNPIVOT column list aliases to be either strings or ints, but
