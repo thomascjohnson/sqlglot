@@ -460,11 +460,13 @@ class Teradata(Dialect):
             return f"NAMED {self.sql(expression, 'value')}"
 
         def teradataconversion_sql(self, expression: exp.TeradataConversion) -> str:
-            args = ", ".join(
-                [
-                    f"{'FORMAT ' if arg == 'fmt' else ''}{self.sql(expression.args[arg])}"
-                    for arg in expression.args["attribute_order"]
-                    if arg not in ("attribute_order", "this")
-                ]
-            )
-            return f"{self.sql(expression, "this")} ({args})"
+            conversion_args = [
+                arg
+                for arg in expression.args["attribute_order"]
+                if arg not in ("attribute_order", "this")
+            ]
+            args = [
+                f"{'FORMAT ' if arg == 'fmt' else ''}{self.sql(expression.args[arg])}"
+                for arg in conversion_args
+            ]
+            return f"{self.sql(expression, "this")} ({', '.join(args)})"
