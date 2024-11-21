@@ -758,6 +758,7 @@ class Parser(metaclass=_Parser):
         exp.From: lambda self: self._parse_from(joins=True),
         exp.Group: lambda self: self._parse_group(),
         exp.Having: lambda self: self._parse_having(),
+        exp.Hint: lambda self: self._parse_hint_body(),
         exp.Identifier: lambda self: self._parse_id_var(),
         exp.Join: lambda self: self._parse_join(),
         exp.Lambda: lambda self: self._parse_lambda(),
@@ -1057,6 +1058,11 @@ class Parser(metaclass=_Parser):
         "TTL": lambda self: self.expression(exp.MergeTreeTTL, expressions=[self._parse_bitwise()]),
         "UNIQUE": lambda self: self._parse_unique(),
         "UPPERCASE": lambda self: self.expression(exp.UppercaseColumnConstraint),
+        "WATERMARK": lambda self: self.expression(
+            exp.WatermarkColumnConstraint,
+            this=self._match(TokenType.FOR) and self._parse_column(),
+            expression=self._match(TokenType.ALIAS) and self._parse_disjunction(),
+        ),
         "WITH": lambda self: self.expression(
             exp.Properties, expressions=self._parse_wrapped_properties()
         ),
@@ -1091,6 +1097,7 @@ class Parser(metaclass=_Parser):
         "PERIOD",
         "PRIMARY KEY",
         "UNIQUE",
+        "WATERMARK",
     }
 
     NO_PAREN_FUNCTION_PARSERS = {
@@ -1359,6 +1366,9 @@ class Parser(metaclass=_Parser):
 
     # Whether a PARTITION clause can follow a table reference
     SUPPORTS_PARTITION_SELECTION = False
+
+    # Whether the `name AS expr` schema/column constraint requires parentheses around `expr`
+    WRAPPED_TRANSFORM_COLUMN_CONSTRAINT = True
 
     __slots__ = (
         "error_level",
@@ -1913,6 +1923,8 @@ class Parser(metaclass=_Parser):
             elif create_token.token_type == TokenType.VIEW:
                 if self._match_text_seq("WITH", "NO", "SCHEMA", "BINDING"):
                     no_schema_binding = True
+            elif create_token.token_type in (TokenType.SINK, TokenType.SOURCE):
+                extend_props(self._parse_properties())
 
             shallow = self._match_text_seq("SHALLOW")
 
@@ -3228,21 +3240,42 @@ class Parser(metaclass=_Parser):
 
         return this
 
-    def _parse_hint(self) -> t.Optional[exp.Hint]:
-        if self._match(TokenType.HINT):
-            hints = []
+    def _parse_hint_fallback_to_string(self) -> t.Optional[exp.Hint]:
+        start = self._curr
+        while self._curr:
+            self._advance()
+
+        end = self._tokens[self._index - 1]
+        return exp.Hint(expressions=[self._find_sql(start, end)])
+
+    def _parse_hint_function_call(self) -> t.Optional[exp.Expression]:
+        return self._parse_function_call()
+
+    def _parse_hint_body(self) -> t.Optional[exp.Hint]:
+        start_index = self._index
+        should_fallback_to_string = False
+
+        hints = []
+        try:
             for hint in iter(
                 lambda: self._parse_csv(
-                    lambda: self._parse_function() or self._parse_var(upper=True)
+                    lambda: self._parse_hint_function_call() or self._parse_var(upper=True),
                 ),
                 [],
             ):
                 hints.extend(hint)
+        except ParseError:
+            should_fallback_to_string = True
 
-            if not self._match_pair(TokenType.STAR, TokenType.SLASH):
-                self.raise_error("Expected */ after HINT")
+        if should_fallback_to_string or self._curr:
+            self._retreat(start_index)
+            return self._parse_hint_fallback_to_string()
 
-            return self.expression(exp.Hint, expressions=hints)
+        return self.expression(exp.Hint, expressions=hints)
+
+    def _parse_hint(self) -> t.Optional[exp.Hint]:
+        if self._match(TokenType.HINT) and self._prev_comments:
+            return exp.maybe_parse(self._prev_comments[0], into=exp.Hint, dialect=self.dialect)
 
         return None
 
@@ -5477,12 +5510,19 @@ class Parser(metaclass=_Parser):
                 not_null=self._match_pair(TokenType.NOT, TokenType.NULL),
             )
             constraints.append(self.expression(exp.ColumnConstraint, kind=constraint_kind))
-        elif kind and self._match_pair(TokenType.ALIAS, TokenType.L_PAREN, advance=False):
-            self._match(TokenType.ALIAS)
+        elif (
+            kind
+            and self._match(TokenType.ALIAS, advance=False)
+            and (
+                not self.WRAPPED_TRANSFORM_COLUMN_CONSTRAINT
+                or (self._next and self._next.token_type == TokenType.L_PAREN)
+            )
+        ):
+            self._advance()
             constraints.append(
                 self.expression(
                     exp.ColumnConstraint,
-                    kind=exp.TransformColumnConstraint(this=self._parse_field()),
+                    kind=exp.TransformColumnConstraint(this=self._parse_disjunction()),
                 )
             )
 
