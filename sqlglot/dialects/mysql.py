@@ -145,6 +145,8 @@ def _remove_ts_or_ds_to_date(
 
 
 class MySQL(Dialect):
+    PROMOTE_TO_INFERRED_DATETIME_TYPE = True
+
     # https://dev.mysql.com/doc/refman/8.0/en/identifiers.html
     IDENTIFIERS_CAN_START_WITH_DIGIT = True
 
@@ -305,6 +307,7 @@ class MySQL(Dialect):
             "DAYOFMONTH": lambda args: exp.DayOfMonth(this=exp.TsOrDsToDate(this=seq_get(args, 0))),
             "DAYOFWEEK": lambda args: exp.DayOfWeek(this=exp.TsOrDsToDate(this=seq_get(args, 0))),
             "DAYOFYEAR": lambda args: exp.DayOfYear(this=exp.TsOrDsToDate(this=seq_get(args, 0))),
+            "FORMAT": exp.NumberToStr.from_arg_list,
             "FROM_UNIXTIME": build_formatted_time(exp.UnixToTime, "mysql"),
             "ISNULL": isnull_to_is_null,
             "LOCATE": locate_to_strposition,
@@ -733,6 +736,7 @@ class MySQL(Dialect):
             exp.Month: _remove_ts_or_ds_to_date(),
             exp.NullSafeEQ: lambda self, e: self.binary(e, "<=>"),
             exp.NullSafeNEQ: lambda self, e: f"NOT {self.binary(e, '<=>')}",
+            exp.NumberToStr: rename_func("FORMAT"),
             exp.Pivot: no_pivot_sql,
             exp.Select: transforms.preprocess(
                 [
@@ -784,6 +788,8 @@ class MySQL(Dialect):
         }
 
         TIMESTAMP_TYPE_MAPPING = {
+            exp.DataType.Type.DATETIME2: "DATETIME",
+            exp.DataType.Type.SMALLDATETIME: "DATETIME",
             exp.DataType.Type.TIMESTAMP: "DATETIME",
             exp.DataType.Type.TIMESTAMPTZ: "TIMESTAMP",
             exp.DataType.Type.TIMESTAMPLTZ: "TIMESTAMP",
